@@ -1,0 +1,19 @@
+{
+  "name": "kosci",
+  "version": "1.0.0",
+  "description": "",
+  "scripts": {
+    "build": "mkdir -p app/src/main/assets && esbuild web/src/main.js --bundle --minify --format=iife --target=es2019 --outfile=app/src/main/assets/app.js && cp web/index.html web/style.css app/src/main/assets/"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "cannon-es": "^0.20.0",
+    "three": "^0.170.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.0"
+  },
+  "private": true
+}

@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Kościany Turniej</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="menu" class="screen active">
+  <div class="logo">
+    <div class="logo-dice"><span>⚄</span><span>⚂</span><span>⚅</span></div>
+    <h1>Kościany<br>Turniej</h1>
+    <p class="sub">5 kości · 3 rzuty · 13 rubryk</p>
+  </div>
+  <div class="menu-box">
+    <button class="big" id="btn-pvp">👥 Dwóch graczy</button>
+    <div class="names" id="names-pvp">
+      <input id="name1" maxlength="12" value="Gracz 1" aria-label="Imię gracza 1">
+      <input id="name2" maxlength="12" value="Gracz 2" aria-label="Imię gracza 2">
+    </div>
+    <button class="big" id="btn-cpu">🤖 Gra z komputerem</button>
+    <button class="ghost" id="btn-rules">Zasady gry</button>
+  </div>
+</div>
+
+<div id="game" class="screen">
+  <header>
+    <button class="icon" id="btn-quit" aria-label="Menu">✕</button>
+    <div class="turn"><span id="turn-name"></span><small id="turn-round"></small></div>
+    <div class="scores-mini" id="scores-mini"></div>
+  </header>
+  <div id="tray"></div>
+  <div class="controls">
+    <div class="rolls" id="rolls"><i></i><i></i><i></i></div>
+    <div class="hint" id="hint"></div>
+    <button class="roll" id="btn-roll">RZUĆ</button>
+  </div>
+  <div class="sheet-wrap">
+    <table id="sheet"></table>
+  </div>
+</div>
+
+<div id="modal" class="modal hidden">
+  <div class="card" id="modal-card"></div>
+</div>
+<div id="toast" class="toast"></div>
+
+<script src="app.js"></script>
+</body>
+</html>
