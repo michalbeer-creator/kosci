@@ -110,3 +110,11 @@ tr.gap td { height: 4px; padding: 0; background: transparent; }
   background: rgba(20,12,6,.9); border: 2px solid var(--gold); color: var(--text); padding: 14px 24px; border-radius: 16px;
   font-size: 20px; font-weight: 800; transition: all .25s; z-index: 20; text-align: center; }
 .toast.show { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+
+/* GRA NA DWÓCH TELEFONACH */
+.card .muted, .muted { color: var(--muted); font-size: 13px; }
+.found-list { display: flex; flex-direction: column; gap: 10px; margin-top: 8px; }
+.big.found { background: linear-gradient(#7cc4f0, #3b82b8); color: #08202f; box-shadow: 0 4px 0 #23557b, 0 8px 20px rgba(0,0,0,.35); }
+.spinner { width: 34px; height: 34px; margin: 14px auto 0; border-radius: 50%;
+  border: 4px solid var(--panel2); border-top-color: var(--gold); animation: spin 0.9s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }

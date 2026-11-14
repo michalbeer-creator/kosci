@@ -10,6 +10,7 @@ import android.webkit.WebViewClient;
 
 public class MainActivity extends Activity {
     private WebView web;
+    private NearbyBridge nearby;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -25,6 +26,8 @@ public class MainActivity extends Activity {
         s.setMediaPlaybackRequiresUserGesture(false);
         s.setTextZoom(100);
         web.setWebViewClient(new WebViewClient());
+        nearby = new NearbyBridge(this, web);
+        web.addJavascriptInterface(nearby, "NearbyNative");
         setContentView(web);
         if (savedInstanceState != null) {
             web.restoreState(savedInstanceState);
@@ -44,6 +47,19 @@ public class MainActivity extends Activity {
         web.evaluateJavascript("window.handleBack ? String(window.handleBack()) : 'false'", value -> {
             if (!"\"true\"".equals(value)) MainActivity.super.onBackPressed();
         });
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        nearby.onPermissionsResult(requestCode, grantResults);
+    }
+
+    @Override
+    protected void onDestroy() {
+        nearby.shutdown();
+        web.destroy();
+        super.onDestroy();
     }
 
     @Override

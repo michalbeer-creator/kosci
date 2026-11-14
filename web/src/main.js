@@ -3,6 +3,7 @@ import {
   CATEGORIES, newSheet, scoreFor, applyScore, upperSum, bonus, total, isComplete, BONUS_THRESHOLD,
 } from './rules.js';
 import { chooseHolds, bestCategory } from './ai.js';
+import { net } from './net.js';
 
 const $ = (id) => document.getElementById(id);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -58,13 +59,25 @@ const RULES_HTML = `
 function newGame(vsCpu) {
   const n1 = ($('name1').value.trim() || 'Gracz 1');
   const n2 = vsCpu ? 'Komputer' : ($('name2').value.trim() || 'Gracz 2');
-  G = {
+  beginGame({
     vsCpu,
     players: [
       { name: vsCpu ? (n1 === 'Gracz 1' ? 'Ty' : n1) : n1, sheet: newSheet(), cpu: false },
       { name: n2, sheet: newSheet(), cpu: vsCpu },
     ],
-    cur: 0,
+    first: 0,
+  });
+}
+
+function beginGame(opts) {
+  closeModal();
+  G = {
+    vsCpu: false,
+    net: false,
+    me: 0,
+    first: 0,
+    ...opts,
+    cur: opts.first || 0,
     round: 1,
     rollsLeft: 3,
     rolled: false,
@@ -72,17 +85,23 @@ function newGame(vsCpu) {
     sel: null,
     busy: false,
     token: 0,
+    moves: 0,
   };
   show('game');
   if (!tray) {
     tray = new DiceTray($('tray'));
     tray.onTap = onDieTap;
     window.__tray = tray;
+    window.__game = () => G;
   }
   startTurn(true);
 }
 
 function player() { return G.players[G.cur]; }
+// czy ten telefon może teraz wykonać ruch (nie komputer, nie przeciwnik po drugiej stronie)
+function myTurn() { return G && !player().cpu && !player().remote; }
+function canAct() { return myTurn() && !G.busy && !G.paused && !tray.rolling; }
+function sendNet(msg) { if (G && G.net) net.send({ ...msg, n: G.moves }); }
 
 function startTurn(first) {
   G.rollsLeft = 3;
@@ -91,38 +110,48 @@ function startTurn(first) {
   tray.releaseAll();
   render();
   const p = player();
-  if (!first || G.vsCpu) toast(p.cpu ? 'Ruch komputera' : (G.vsCpu ? 'Twój ruch' : `Tura: ${p.name}`));
+  if (G.net) toast(p.remote ? `Ruch: ${p.name}` : 'Twój ruch');
+  else if (!first || G.vsCpu) toast(p.cpu ? 'Ruch komputera' : (G.vsCpu ? 'Twój ruch' : `Tura: ${p.name}`));
   if (p.cpu) runCpu(G.token);
 }
 
 async function doRoll() {
-  if (G.busy || tray.rolling || G.rollsLeft <= 0) return;
+  if (G.busy || G.paused || tray.rolling || G.rollsLeft <= 0) return;
   G.busy = true;
   G.sel = null;
   G.rollsLeft--;
+  const token = G.token;
+  sendNet({ t: 'roll', held: [...tray.held] });
   render();
   const vals = await tray.roll();
-  if (!G) return;
+  if (!G || token !== G.token) return;
   G.dice = vals;
   G.rolled = true;
   G.busy = false;
+  G.moves++;
+  sendNet({ t: 'rolled', vals, rollsLeft: G.rollsLeft, held: [...tray.held] });
   render();
 }
 
 function onDieTap(i) {
-  if (!G || G.busy || tray.rolling || player().cpu || !G.rolled || G.rollsLeft === 0) return;
+  if (!G || !canAct() || !G.rolled || G.rollsLeft === 0) return;
   tray.setHeld(i, !tray.held[i]);
+  G.moves++;
+  sendNet({ t: 'hold', i, on: tray.held[i] });
   render();
 }
 
 function onCellTap(id) {
-  if (!G || G.busy || tray.rolling || player().cpu || !G.rolled) return;
+  if (!G || !canAct() || !G.rolled) return;
   if (player().sheet[id] !== null) return;
   G.sel = G.sel === id ? null : id;
+  G.moves++;
+  sendNet({ t: 'sel', id: G.sel });
   render();
 }
 
 async function commit(id) {
+  if (myTurn()) { G.moves++; sendNet({ t: 'commit', id }); }
   const p = player();
   const extra = applyScore(p.sheet, id, G.dice);
   G.justCell = { p: G.cur, id };
@@ -138,7 +167,7 @@ async function commit(id) {
   G.justCell = null;
   if (G.players.every((pl) => isComplete(pl.sheet))) return endGame();
   G.cur = 1 - G.cur;
-  if (G.cur === 0) G.round++;
+  if (G.cur === G.first) G.round++;
   startTurn(false);
 }
 
@@ -179,9 +208,18 @@ function endGame() {
   let title;
   if (winners.length > 1) title = 'Remis!';
   else if (G.vsCpu) title = winners[0].name === 'Komputer' ? 'Komputer wygrywa' : 'Wygrałeś!';
+  else if (G.net) title = res[G.me].t === best ? 'Wygrałeś!' : `Wygrywa ${winners[0].name}`;
   else title = `Wygrywa ${winners[0].name}!`;
   const rows = res.map((r) => `<div class="result ${r.t === best ? 'win' : ''}"><span>${esc(r.name)}</span><span>${r.t}</span></div>`).join('');
   const vs = G.vsCpu;
+  G.over = true;
+  if (G.net) {
+    modal(`<div class="trophy">🏆</div><h2 style="text-align:center">${esc(title)}</h2>${rows}`, [
+      ['Rewanż', askRematch],
+      ['Menu', leaveNetGame, 'ghost'],
+    ]);
+    return;
+  }
   modal(`<div class="trophy">🏆</div><h2 style="text-align:center">${esc(title)}</h2>${rows}`, [
     ['Rewanż', () => newGame(vs)],
     ['Menu', () => { G = null; show('menu'); }, 'ghost'],
@@ -193,7 +231,7 @@ function esc(s) { return s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;
 function render() {
   if (!G) return;
   const p = player();
-  $('turn-name').textContent = p.cpu ? '🤖 Komputer' : (G.vsCpu ? `🎲 ${p.name}` : `🎲 ${p.name}`);
+  $('turn-name').textContent = p.cpu ? '🤖 Komputer' : (p.remote ? `📡 ${p.name}` : `🎲 ${p.name}`);
   $('turn-name').style.color = COLORS[G.cur];
   $('turn-round').textContent = `Runda ${Math.min(G.round, 13)} z 13`;
   $('scores-mini').innerHTML = G.players.map((pl, i) =>
@@ -209,12 +247,14 @@ function render() {
     const cat = CATEGORIES.find((c) => c.id === G.sel);
     btn.textContent = `Zapisz ${v}`;
     btn.classList.add('save');
-    btn.disabled = p.cpu || G.busy;
-    hint.textContent = `${cat.name}: ${v} pkt`;
+    btn.disabled = !myTurn() || G.busy || G.paused;
+    hint.textContent = p.remote ? `${p.name} wybiera: ${cat.name} (${v})` : `${cat.name}: ${v} pkt`;
   } else {
     btn.textContent = G.rollsLeft === 3 ? 'RZUĆ' : `RZUĆ (${G.rollsLeft})`;
-    btn.disabled = p.cpu || G.busy || G.rollsLeft === 0;
-    if (p.cpu) hint.textContent = 'Komputer myśli…';
+    btn.disabled = !myTurn() || G.busy || G.paused || G.rollsLeft === 0;
+    if (G.paused) hint.textContent = 'Brak połączenia…';
+    else if (p.cpu) hint.textContent = 'Komputer myśli…';
+    else if (p.remote) hint.textContent = `Czekaj, rzuca ${p.name}…`;
     else if (G.busy) hint.textContent = '';
     else if (!G.rolled) hint.textContent = 'Rzuć kośćmi';
     else if (G.rollsLeft > 0) hint.textContent = 'Dotknij kości, by zatrzymać. Albo wybierz rubrykę.';
@@ -263,7 +303,8 @@ $('sheet').addEventListener('click', (e) => {
 
 $('btn-roll').onclick = () => {
   if (!G) return;
-  if (G.sel) { if (!G.busy && !player().cpu) commit(G.sel); } else doRoll();
+  if (!canAct()) return;
+  if (G.sel) commit(G.sel); else doRoll();
 };
 
 $('btn-pvp').onclick = () => newGame(false);
@@ -273,14 +314,369 @@ $('btn-rules').onclick = () => modal(RULES_HTML, [['OK', null]]);
 function askQuit() {
   modal('<h2>Przerwać grę?</h2><p>Bieżąca rozgrywka zostanie utracona.</p>', [
     ['Wróć do gry', null],
-    ['Wyjdź do menu', () => { G.token++; G = null; show('menu'); }, 'ghost'],
+    ['Wyjdź do menu', () => { if (G.net) return leaveNetGame(); G.token++; G = null; show('menu'); }, 'ghost'],
   ]);
 }
 $('btn-quit').onclick = askQuit;
 
 // wywoływane przez przycisk "wstecz" w Androidzie; true = obsłużone
 window.handleBack = () => {
-  if (modalOpen()) { closeModal(); return true; }
+  if (modalOpen()) {
+    if (lobby || (G && (G.paused || G.over))) return true; // te okna zamyka się przyciskiem
+    closeModal(); return true;
+  }
   if (G) { askQuit(); return true; }
   return false;
 };
+
+// ======================= GRA NA DWÓCH TELEFONACH (Nearby) =======================
+
+const SEP = '|';
+let lobby = null;        // { role: 'host'|'join', name, found: Map, connecting }
+let netQueue = Promise.resolve();
+let rejoinTimer = null;
+const myPid = Math.random().toString(36).slice(2, 10);
+
+const cleanName = (s) => (s || '').replace(/[|<>]/g, '').trim().slice(0, 12);
+const myName = () => cleanName($('name1').value) || 'Gracz';
+const shownName = (adv) => adv.split(SEP)[0];
+
+function netError(text) {
+  modal(`<h2>Gra na dwóch telefonach</h2><p>${text}</p>`, [['OK', null]]);
+}
+
+function openNetMenu() {
+  if (!net.available()) {
+    return netError('Ta opcja działa tylko w aplikacji na Androidzie.');
+  }
+  if (!net.status().gms) {
+    return netError('Ten telefon nie ma Usług Google Play, które są potrzebne do gry na dwóch telefonach.');
+  }
+  modal(`<h2>📡 Gra na dwóch telefonach</h2>
+    <p>Na obu telefonach włącz <b>Bluetooth</b> i <b>Wi-Fi</b> (internet nie jest potrzebny).
+    Jeden telefon zakłada grę, drugi do niej dołącza.</p>
+    <p class="muted">Grasz jako: <b>${esc(myName())}</b> (imię zmienisz w menu, pole „Gracz 1”).</p>`, [
+    ['Załóż grę', startHosting],
+    ['Dołącz do gry', startJoining],
+    ['Anuluj', null, 'ghost'],
+  ]);
+}
+
+function lobbyView() {
+  if (!lobby) return;
+  const cancel = ['Anuluj', cancelLobby, 'ghost'];
+  if (lobby.connecting) {
+    modal(`<h2>Łączenie…</h2><p>Łączę z: <b>${esc(lobby.connecting)}</b></p><div class="spinner"></div>`, [cancel]);
+  } else if (lobby.role === 'host') {
+    modal(`<h2>Czekam na drugiego gracza</h2>
+      <p>Twoja gra: <b>${esc(lobby.name)}</b></p>
+      <p>Na drugim telefonie wybierz <b>📡 Gra na dwóch telefonach → Dołącz do gry</b>.</p>
+      <div class="spinner"></div>`, [cancel]);
+  } else {
+    const items = [...lobby.found.entries()];
+    modal(`<h2>Gry w pobliżu</h2>
+      ${items.length ? '<p>Dotknij gry, żeby dołączyć:</p>' : '<p>Szukam… Upewnij się, że drugi telefon założył grę.</p><div class="spinner"></div>'}
+      <div class="found-list"></div>`, [cancel]);
+    const box = $('modal-card').querySelector('.found-list');
+    for (const [id, adv] of items) {
+      const b = document.createElement('button');
+      b.className = 'big found';
+      b.textContent = `🎲 ${shownName(adv)}`;
+      b.onclick = () => {
+        lobby.connecting = shownName(adv);
+        lobby.target = adv;
+        lobbyView();
+        net.connect(id, myName() + SEP + myPid);
+      };
+      box.appendChild(b);
+    }
+  }
+}
+
+function startHosting() {
+  lobby = { role: 'host', name: myName(), found: new Map() };
+  lobby.adv = lobby.name + SEP + myPid;
+  lobbyView();
+  net.host(lobby.adv);
+}
+
+function startJoining() {
+  lobby = { role: 'join', name: myName(), found: new Map() };
+  lobbyView();
+  net.join(myName() + SEP + myPid);
+}
+
+function cancelLobby() {
+  lobby = null;
+  net.stop();
+  closeModal();
+}
+
+function beginNetGame(names, first, me, peerPid) {
+  lobby = null;
+  netQueue = Promise.resolve();
+  beginGame({
+    net: true,
+    me,
+    first,
+    peerPid,
+    players: names.map((name, i) => ({ name, sheet: newSheet(), cpu: false, remote: i !== me })),
+  });
+}
+
+// --- zdarzenia z Nearby ---
+net.on((ev) => {
+  switch (ev.type) {
+    case 'found':
+      if (G && G.net && G.paused && G.me === 1) {
+        // ponowne łączenie: szukamy tego samego hosta
+        if (ev.name.split(SEP)[1] === G.peerPid && !G.reconnecting) {
+          G.reconnecting = true;
+          net.connect(ev.id, G.players[G.me].name + SEP + myPid);
+        }
+        return;
+      }
+      if (lobby && lobby.role === 'join') { lobby.found.set(ev.id, ev.name); if (!lobby.connecting) lobbyView(); }
+      break;
+    case 'lost':
+      if (lobby && lobby.found.delete(ev.id) && !lobby.connecting) lobbyView();
+      break;
+    case 'connecting':
+      if (lobby && lobby.role === 'host' && !lobby.connecting) { lobby.connecting = shownName(ev.name); lobbyView(); }
+      break;
+    case 'connected':
+      net.send({ t: 'hello', v: 1, name: G && G.net ? G.players[G.me].name : myName(), pid: myPid, inGame: !!(G && G.net) });
+      break;
+    case 'connect-failed':
+      if (G && G.net && G.paused) { G.reconnecting = false; scheduleRejoin(); return; }
+      if (lobby) {
+        lobby.connecting = null;
+        lobbyView();
+        toast('Nie udało się połączyć. Spróbuj ponownie.', 2200);
+        if (lobby.role === 'host') net.host(lobby.adv);
+      }
+      break;
+    case 'disconnected':
+      onDisconnected();
+      break;
+    case 'permission-denied':
+      lobby = null;
+      modal(`<h2>Brak uprawnień</h2><p>Bez zgody na <b>urządzenia w pobliżu</b> (Bluetooth / Wi-Fi${
+        ev.permanent ? '' : ', a na starszych Androidach lokalizację'}) gra na dwóch telefonach nie zadziała.</p>`,
+      ev.permanent
+        ? [['Otwórz ustawienia', () => net.openSettings()], ['Anuluj', null, 'ghost']]
+        : [['Spróbuj jeszcze raz', openNetMenu], ['Anuluj', null, 'ghost']]);
+      break;
+    case 'error':
+      if (ev.where === 'send') return;
+      if (G && G.net && G.paused) { G.reconnecting = false; scheduleRejoin(); return; }
+      lobby = null;
+      net.stop();
+      netError(`Nie udało się ${ev.where === 'advertise' ? 'założyć gry' : ev.where === 'discover' ? 'wyszukać gier' : 'połączyć'}.
+        Sprawdź, czy Bluetooth, Wi-Fi i lokalizacja są włączone.<br><small class="muted">(${esc(String(ev.message))})</small>`);
+      break;
+    case 'message':
+      onNetMessage(ev.data);
+      break;
+    default:
+  }
+});
+
+function onNetMessage(m) {
+  if (m.t === 'hello') {
+    if (G && G.net) {
+      if (m.pid !== G.peerPid) { net.stop(); scheduleRejoin(); return; } // ktoś obcy – czekamy na naszego gracza
+      reconnected();
+      return;
+    }
+    if (lobby && lobby.role === 'host') {
+      const first = 0;
+      const names = [lobby.name, cleanName(m.name) || 'Gość'];
+      net.send({ t: 'start', names, first, pid: myPid });
+      beginNetGame(names, first, 0, m.pid);
+    }
+    return;
+  }
+  if (m.t === 'start') {
+    if (G && G.net && !G.over) return;
+    beginNetGame(m.names, m.first, 1, m.pid);
+    return;
+  }
+  if (!G || !G.net) return;
+  if (m.t === 'bye') {
+    const who = G.players[1 - G.me].name;
+    G.token++;
+    G.left = true;
+    net.stop();
+    modal(`<h2>Koniec gry</h2><p><b>${esc(who)}</b> opuścił grę.</p>`, [['Menu', () => { G = null; show('menu'); }]]);
+    return;
+  }
+  if (m.t === 'rematch') {
+    G.peerRematch = true;
+    if (!G.wantRematch) toast('Przeciwnik chce rewanżu', 2500);
+    tryRematch();
+    return;
+  }
+  // ruchy gry wykonujemy po kolei – animacje nie mogą na siebie nachodzić
+  netQueue = netQueue.then(() => applyRemote(m)).catch((e) => console.error(e));
+}
+
+async function applyRemote(m) {
+  if (!G || !G.net) return;
+  const remoteTurn = player().remote;
+  switch (m.t) {
+    case 'roll': {
+      if (!remoteTurn) return;
+      syncHeld(m.held);
+      G.busy = true;
+      G.sel = null;
+      G.rollsLeft = Math.max(0, G.rollsLeft - 1);
+      render();
+      await tray.roll();
+      break;
+    }
+    case 'rolled': {
+      if (!remoteTurn) return;
+      while (tray.rolling) await sleep(50);
+      syncHeld(m.held);
+      for (let i = 0; i < 5; i++) if (!tray.held[i]) tray.faceUp(i, m.vals[i], 280);
+      await sleep(320);
+      if (!G) return;
+      G.dice = m.vals;
+      G.rollsLeft = m.rollsLeft;
+      G.rolled = true;
+      G.busy = false;
+      G.moves++;
+      render();
+      break;
+    }
+    case 'hold':
+      if (!remoteTurn) return;
+      tray.setHeld(m.i, m.on);
+      G.moves++;
+      render();
+      await sleep(270);
+      break;
+    case 'sel':
+      if (!remoteTurn) return;
+      G.sel = m.id;
+      G.moves++;
+      render();
+      break;
+    case 'commit':
+      if (!remoteTurn) return;
+      G.moves++;
+      await commit(m.id);
+      break;
+    case 'sync':
+      await waitIdle();
+      if (G && m.moves > G.moves) adoptState(m.state, m.moves);
+      break;
+    default:
+  }
+}
+
+function syncHeld(held) {
+  if (!held) return;
+  for (let i = 0; i < 5; i++) if (tray.held[i] !== held[i]) tray.setHeld(i, held[i]);
+}
+
+async function waitIdle() {
+  while (G && (G.busy || tray.rolling)) await sleep(100);
+}
+
+function snapshot() {
+  return {
+    sheets: G.players.map((p) => p.sheet),
+    cur: G.cur, round: G.round, rollsLeft: G.rollsLeft, rolled: G.rolled,
+    dice: G.dice, held: [...tray.held], sel: G.sel,
+  };
+}
+
+function adoptState(st, moves) {
+  G.token++;
+  st.sheets.forEach((sh, i) => { G.players[i].sheet = sh; });
+  Object.assign(G, { cur: st.cur, round: st.round, rollsLeft: st.rollsLeft, rolled: st.rolled, dice: st.dice, sel: st.sel });
+  G.moves = moves;
+  G.busy = false;
+  G.justCell = null;
+  tray.setState(st.dice, st.held);
+  render();
+  if (G.players.every((pl) => isComplete(pl.sheet))) endGame();
+}
+
+// --- zerwane połączenie ---
+function onDisconnected() {
+  if (lobby) {
+    lobby.connecting = null;
+    lobbyView();
+    if (lobby.role === 'host') net.host(lobby.adv);
+    return;
+  }
+  if (!G || !G.net || G.left) return;
+  if (G.over) { toast('Połączenie zerwane', 2500); return; }
+  G.paused = true;
+  G.reconnecting = false;
+  render();
+  const other = G.players[1 - G.me].name;
+  modal(`<h2>Połączenie zerwane</h2>
+    <p>Straciłem kontakt z telefonem: <b>${esc(other)}</b>. Próbuję połączyć ponownie…</p>
+    <p class="muted">Telefony powinny być blisko siebie, z włączonym Bluetooth i Wi-Fi. Wynik jest zapamiętany.</p>
+    <div class="spinner"></div>`, [['Zakończ grę', leaveNetGame, 'ghost']]);
+  rejoin();
+}
+
+function rejoin() {
+  clearTimeout(rejoinTimer);
+  if (!G || !G.paused) return;
+  if (G.me === 0) net.host(G.players[0].name + SEP + myPid);
+  else net.join(G.players[1].name + SEP + myPid);
+}
+
+function scheduleRejoin() {
+  clearTimeout(rejoinTimer);
+  rejoinTimer = setTimeout(() => { net.stopSearch(); rejoin(); }, 2500);
+}
+
+async function reconnected() {
+  clearTimeout(rejoinTimer);
+  if (!G) return;
+  G.paused = false;
+  G.reconnecting = false;
+  closeModal();
+  toast('Połączono ponownie', 1800);
+  render();
+  await waitIdle();
+  if (G && G.net) net.send({ t: 'sync', moves: G.moves, state: snapshot() });
+}
+
+// --- wyjście i rewanż ---
+function leaveNetGame() {
+  clearTimeout(rejoinTimer);
+  if (G) { G.token++; sendNet({ t: 'bye' }); }
+  setTimeout(() => net.stop(), 300); // daj czas na wysłanie „bye”
+  G = null;
+  closeModal();
+  show('menu');
+}
+
+function askRematch() {
+  if (!G) return;
+  G.wantRematch = true;
+  sendNet({ t: 'rematch' });
+  if (!G.peerRematch) {
+    modal('<h2>Rewanż</h2><p>Czekam, aż przeciwnik też wybierze „Rewanż”…</p><div class="spinner"></div>',
+      [['Menu', leaveNetGame, 'ghost']]);
+  }
+  tryRematch();
+}
+
+function tryRematch() {
+  if (!G || !G.wantRematch || !G.peerRematch || G.me !== 0) return;
+  const names = G.players.map((p) => p.name);
+  const first = 1 - G.first; // zaczyna na zmianę
+  net.send({ t: 'start', names, first, pid: myPid });
+  beginNetGame(names, first, 0, G.peerPid);
+}
+
+$('btn-net').onclick = openNetMenu;
