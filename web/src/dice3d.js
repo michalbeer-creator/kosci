@@ -106,6 +106,8 @@ export class DiceTray {
     this.onTap = null;
     this.rolling = false;
     this.held = new Array(N).fill(false);
+    this.heldQ = new Array(N).fill(null);   // orientacja „górą do góry” zatrzymanej kości
+    this.heldVal = new Array(N).fill(0);    // wartość zatrzymanej kości (na półce kość jest pochylona do kamery)
     this.sound = new Sound();
     this.anims = [];
 
@@ -305,7 +307,7 @@ export class DiceTray {
   }
 
   values() {
-    return this.dice.map((_, i) => FACE_VALUES[this.topAxis(i).k]);
+    return this.dice.map((_, i) => (this.held[i] && this.heldQ[i] ? this.heldVal[i] : FACE_VALUES[this.topAxis(i).k]));
   }
 
   _tap(e) {
@@ -348,22 +350,29 @@ export class DiceTray {
 
   _placeHeld(i, animate = true) {
     const { mesh, body } = this.dice[i];
-    // obróć tak, by górna ściana była idealnie na górze
-    const { k } = this.topAxis(i);
-    const axisW = FACE_AXES[k].clone().applyQuaternion(mesh.quaternion);
-    const fix = new THREE.Quaternion().setFromUnitVectors(axisW, new THREE.Vector3(0, 1, 0));
-    let q = fix.multiply(mesh.quaternion.clone());
-    // wyrównaj obrót wokół osi pionowej do wielokrotności 90°
-    const side = FACE_AXES[(k + 2) % 6].clone().applyQuaternion(q);
-    const yaw = Math.atan2(side.z, side.x);
-    const err = yaw - Math.round(yaw / (Math.PI / 2)) * (Math.PI / 2);
-    q = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), err).multiply(q);
+    if (!this.heldQ[i]) {
+      // obróć tak, by górna ściana była idealnie na górze
+      const { k } = this.topAxis(i);
+      const axisW = FACE_AXES[k].clone().applyQuaternion(mesh.quaternion);
+      const fix = new THREE.Quaternion().setFromUnitVectors(axisW, new THREE.Vector3(0, 1, 0));
+      let q0 = fix.multiply(mesh.quaternion.clone());
+      // wyrównaj obrót wokół osi pionowej do wielokrotności 90°
+      const side = FACE_AXES[(k + 2) % 6].clone().applyQuaternion(q0);
+      const yaw = Math.atan2(side.z, side.x);
+      const err = yaw - Math.round(yaw / (Math.PI / 2)) * (Math.PI / 2);
+      q0 = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), err).multiply(q0);
+      this.heldQ[i] = q0;
+      this.heldVal[i] = FACE_VALUES[k];
+    }
+    const pos = this._slot(i);
+    // na półce pochyl kość wynikiem do kamery, żeby było widać tę samą ścianę, którą liczy gra
+    const toCam = this.camera.position.clone().sub(pos).normalize();
+    const q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), toCam).multiply(this.heldQ[i]);
 
     body.type = CANNON.Body.STATIC;
     body.velocity.setZero();
     body.angularVelocity.setZero();
     body.collisionResponse = false;
-    const pos = this._slot(i);
     const done = () => {
       body.position.set(pos.x, pos.y, pos.z);
       body.quaternion.set(q.x, q.y, q.z, q.w);
@@ -377,16 +386,18 @@ export class DiceTray {
     const { mesh, body } = this.dice[i];
     // wróć na stół w wolne miejsce
     const spot = this._freeSpot(i);
+    const q = this.heldQ[i] ? this.heldQ[i].clone() : mesh.quaternion.clone();
+    this.heldQ[i] = null;
     const done = () => {
       body.type = CANNON.Body.DYNAMIC;
       body.collisionResponse = true;
       body.position.set(spot.x, spot.y, spot.z);
-      body.quaternion.copy(mesh.quaternion);
+      body.quaternion.set(q.x, q.y, q.z, q.w);
       body.velocity.setZero();
       body.angularVelocity.setZero();
       body.wakeUp();
     };
-    this._animate(i, spot, mesh.quaternion, 260, done);
+    this._animate(i, spot, q, 260, done);
     this._highlight(i, false);
   }
 
@@ -446,6 +457,8 @@ export class DiceTray {
       const { mesh, body } = this.dice[i];
       if (this.held[i]) {
         this.held[i] = false;
+        if (this.heldQ[i]) { const h = this.heldQ[i]; body.quaternion.set(h.x, h.y, h.z, h.w); }
+        this.heldQ[i] = null;
         this._highlight(i, false);
         const spot = this._freeSpot(i);
         body.type = CANNON.Body.DYNAMIC;
@@ -503,15 +516,28 @@ export class DiceTray {
     const elapsed = performance.now() - s.t0;
     if (s.still > 18 || elapsed > 7000) {
       // kość oparta krzywo? lekko ją trąć
-      const cocked = this.dice.findIndex((_, i) => !this.held[i] && this.topAxis(i).y < 0.97);
-      if (cocked >= 0 && s.nudges < 6 && elapsed < 9000) {
+      // albo leży na innej kości (z góry nie widać wtedy wyniku tej pod spodem)
+      const cocked = this.dice.findIndex((d, i) => !this.held[i] &&
+        (this.topAxis(i).y < 0.97 || d.body.position.y > SIZE / 2 + 0.25));
+      if (cocked >= 0 && s.nudges < 10 && elapsed < 11000) {
         s.nudges++;
         s.still = 0;
         const b = this.dice[cocked].body;
-        b.velocity.set((Math.random() - 0.5) * 3, 4, (Math.random() - 0.5) * 3);
+        const stacked = b.position.y > SIZE / 2 + 0.25;
+        const ang = Math.random() * Math.PI * 2;
+        const sp = stacked ? 4 : 1.5;
+        b.velocity.set(Math.cos(ang) * sp, 4, Math.sin(ang) * sp);
         b.angularVelocity.set((Math.random() - 0.5) * 10, 0, (Math.random() - 0.5) * 10);
         return;
       }
+      // awaryjnie: kość wciąż leży na innej – przestaw ją na wolne miejsce na stole
+      this.dice.forEach((d, i) => {
+        if (this.held[i] || d.body.position.y <= SIZE / 2 + 0.25) return;
+        const spot = this._freeSpot(i);
+        d.body.position.set(spot.x, SIZE / 2, spot.z);
+        d.body.velocity.setZero();
+        d.body.angularVelocity.setZero();
+      });
       this._settle = null;
       this.rolling = false;
       s.resolve(this.values());
