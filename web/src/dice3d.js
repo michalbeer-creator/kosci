@@ -420,6 +420,53 @@ export class DiceTray {
     for (let i = 0; i < N; i++) if (this.held[i]) { this.held[i] = false; this._unplaceHeld(i); }
   }
 
+  // obróć kość tak, by na górze była podana wartość (gra sieciowa: wynik z drugiego telefonu)
+  faceUp(i, value, ms = 0) {
+    const { mesh, body } = this.dice[i];
+    if (FACE_VALUES[this.topAxis(i).k] === value) return;
+    const k = FACE_VALUES.indexOf(value);
+    const axisW = FACE_AXES[k].clone().applyQuaternion(mesh.quaternion);
+    const q = new THREE.Quaternion().setFromUnitVectors(axisW, new THREE.Vector3(0, 1, 0)).multiply(mesh.quaternion.clone());
+    body.velocity.setZero();
+    body.angularVelocity.setZero();
+    const done = () => {
+      body.quaternion.set(q.x, q.y, q.z, q.w);
+      body.position.set(mesh.position.x, mesh.position.y, mesh.position.z);
+    };
+    if (ms) this._animate(i, mesh.position.clone(), q, ms, done);
+    else { mesh.quaternion.copy(q); done(); }
+  }
+
+  // ustaw wynik bez rzutu: wartości i zatrzymane kości (synchronizacja po ponownym połączeniu)
+  setState(vals, held) {
+    if (this._settle) { const s = this._settle; this._settle = null; s.resolve(this.values()); }
+    this.rolling = false;
+    this.anims = [];
+    for (let i = 0; i < N; i++) {
+      const { mesh, body } = this.dice[i];
+      if (this.held[i]) {
+        this.held[i] = false;
+        this._highlight(i, false);
+        const spot = this._freeSpot(i);
+        body.type = CANNON.Body.DYNAMIC;
+        body.collisionResponse = true;
+        body.position.set(spot.x, SIZE / 2, spot.z);
+        mesh.position.copy(body.position);
+      }
+      mesh.quaternion.copy(body.quaternion);
+      // połóż płasko
+      const { k } = this.topAxis(i);
+      const axisW = FACE_AXES[k].clone().applyQuaternion(mesh.quaternion);
+      const q = new THREE.Quaternion().setFromUnitVectors(axisW, new THREE.Vector3(0, 1, 0)).multiply(mesh.quaternion.clone());
+      mesh.quaternion.copy(q);
+      body.quaternion.set(q.x, q.y, q.z, q.w);
+      body.velocity.setZero();
+      body.angularVelocity.setZero();
+      this.faceUp(i, vals[i]);
+    }
+    for (let i = 0; i < N; i++) if (held[i]) { this.held[i] = true; this._placeHeld(i, false); }
+  }
+
   roll() {
     if (this.rolling) return Promise.resolve(this.values());
     this.sound.unlock();
